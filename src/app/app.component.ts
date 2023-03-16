@@ -25,18 +25,92 @@ export class AppComponent {
   }
 
   private setupSignalingServer() {
-    this.signalingConnection = new WebSocket(`ws://localhost:8889/stream`);
-    this.signalingConnection.binaryType = 'arraybuffer';
-    this.signalingConnection.onopen =  (res) => {
-      console.log('connection open');
-      this.setupPeerServer();
-      this.signalingConnection.onmessage = this.getSignalMessageCallback.bind(this)
-      this.signalingConnection.onerror = this.errorHandler.bind(this);
+    const self = this;
+    this.signalingConnection = new WebSocket(`ws://localhost:8889/stream/ws`);
 
+    this.signalingConnection.onerror = () => {
+      console.log("ws error");
+      if (this.signalingConnection === null) {
+        return;
+      }
+      this.signalingConnection.close();
+      // @ts-ignore
+      this.signalingConnection = null;
     };
-    this.signalingConnection.onclose = function (r) {
-      console.log('close');
+
+    this.signalingConnection.onclose = () => {
+      console.log("ws closed");
+      // @ts-ignore
+      this.signalingConnection = null;
     };
+
+    this.signalingConnection.onmessage = (msg) => this.onIceServers(msg);
+  }
+
+  onIceServers(msg: any) {
+    if (this.signalingConnection === null) {
+      return;
+    }
+
+    const iceServers = JSON.parse(msg.data);
+
+    this.peerConnection = new RTCPeerConnection({
+      iceServers,
+    });
+
+    this.signalingConnection.onmessage = (msg) => this.onRemoteDescription(msg);
+    this.peerConnection.onicecandidate = (evt) => this.onIceCandidate(evt);
+
+    this.peerConnection.oniceconnectionstatechange = () => {
+      if (this.peerConnection === null) {
+        return;
+      }
+
+      console.log("peer connection state:", this.peerConnection.iceConnectionState);
+
+      switch (this.peerConnection.iceConnectionState) {
+        case "disconnected":
+          return;// this.scheduleRestart();
+      }
+    };
+
+    this.peerConnection.ontrack = (evt) => {
+      console.log("new track " + evt.track.kind);
+      // @ts-ignore
+      document.getElementById("remoteVideo").srcObject = evt.streams[0];
+    };
+
+    const direction = "sendrecv";
+    this.peerConnection.addTransceiver("video", { direction });
+    this.peerConnection.addTransceiver("audio", { direction });
+
+    this.peerConnection.createOffer()
+      .then((desc) => {
+        if (this.peerConnection === null || this.signalingConnection === null) {
+          return;
+        }
+
+        this.peerConnection.setLocalDescription(desc);
+
+        console.log("sending offer");
+        this.signalingConnection.send(JSON.stringify(desc));
+      });
+  }
+  onRemoteDescription(msg: any) {
+    if (this.peerConnection === null || this.signalingConnection === null) {
+      return;
+    }
+
+    this.peerConnection.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)));
+    this.signalingConnection.onmessage = (msg) => this.onRemoteCandidate(msg);
+  }
+
+  onRemoteCandidate(msg: any) {
+    if (this.peerConnection === null) {
+      return;
+    }
+
+    this.peerConnection.addIceCandidate(JSON.parse(msg.data));
   }
 
   private setupPeerServer() {
@@ -57,8 +131,27 @@ export class AppComponent {
       remoteVideo.srcObject = event.streams[0];
     }
   }
+
+  onIceCandidate(evt:any) {
+    if (this.signalingConnection === null) {
+      return;
+    }
+
+    if (evt.candidate !== null) {
+      if (evt.candidate.candidate !== "") {
+        this.signalingConnection.send(JSON.stringify(evt.candidate));
+      }
+    }
+  }
   private getSignalMessageCallback(): (arg: string) => void {
     return (message: any) => {
+      const iceServers = JSON.parse(message.data);
+
+      this.peerConnection = new RTCPeerConnection({
+        iceServers,
+      });
+      this.peerConnection.onicecandidate = (evt) => this.onIceCandidate(evt);
+
       console.log("wsConnection.onmessage: " + message.data);
       const signal = JSON.parse(message.data);
       const streamInfoResponse = signal['streamInfo'];
